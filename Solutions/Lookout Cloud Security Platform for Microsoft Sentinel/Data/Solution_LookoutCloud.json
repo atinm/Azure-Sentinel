@@ -12,7 +12,7 @@
     "Parsers/LookoutCSViolations.yaml"
   ],
   "BasePath": "\\src\\Azure-Sentinel\\Solutions\\Lookout Cloud Security Platform for Microsoft Sentinel",
-  "Version": "3.0.0",
+  "Version": "3.1.0",
   "Metadata": "SolutionMetadata.json",
   "TemplateSpec": true,
   "Is1Pconnector": false

@@ -8,10 +8,14 @@ import hmac
 import requests
 import re
 import os
+import time
 import logging
+from ratelimit import limits
 from azure.storage.fileshare import ShareClient
 from azure.storage.fileshare import ShareFileClient
 from azure.core.exceptions import ResourceNotFoundError
+
+ONE_MINUTE = 60
 
 jwt_api_key = os.environ["LookoutClientId"]
 jwt_api_secret = os.environ["LookoutApiSecret"]
@@ -20,12 +24,12 @@ shared_key = os.environ["PrimaryKey"]
 connection_string = os.environ["AzureWebJobsStorage"]
 logAnalyticsUri = os.environ.get("logAnalyticsUri")
 baseurl = os.environ["Baseurl"]
-maxResults = os.getenv("MaxResults", 2000)
+maxResults = min(os.getenv("MaxResults", 1000), 1000)
 Authurl = baseurl + "/apigw/v1/authenticate"
 table_name = "LookoutCloudSecurity"
 Schedule = os.getenv("Schedule", "0 */5 * * * *")
 fetchDelay = os.getenv("FetchDelay", 5)
-pastDays = os.getenv("PastDays", 7)
+pastDays = min(os.getenv("PastDays", 7), 7)  # at most 7 days
 chunksize = 500
 MaxEventCount = 2000
 token = ""
@@ -163,6 +167,10 @@ class LookOut:
         except Exception as err:
             logging.error("Something wrong. Exception error text: {}".format(err))
 
+    @limits(calls=2, period=ONE_MINUTE)
+    def do_Get(self, endpoint, headers, payload):
+        requests.get(baseurl + endpoint, headers=headers, params=payload)
+
     def get_Data(self, endpoint, searchId):
         try:
             headers = {
@@ -171,8 +179,9 @@ class LookOut:
             }
             events = []
             startOffset = 0
+            eventCount = 0
 
-            while startOffset >= 0:
+            while startOffset >= 0 and eventCount < MaxEventCount:
                 payload = {
                     "searchId": searchId,
                     "offset": startOffset,
@@ -183,16 +192,18 @@ class LookOut:
                         baseurl + endpoint, payload
                     )
                 )
-                response = requests.get(
+
+                response = self.do_Get(
                     baseurl + endpoint, headers=headers, params=payload
                 )
                 if response.status_code == 200:
                     jsondata = json.loads(response.text)
                     try:
                         events += jsondata["data"]["events"]
+                        eventCount = len(events)
                         startOffset = jsondata["data"]["nextOffset"]
                         # nextOffset == -1 when all events have been read, >= 0 otherwise
-                        if startOffset < 0:
+                        if startOffset < 0 or eventCount >= MaxEventCount:
                             logging.info("returning {} events".format(len(events)))
                             return events
 
@@ -200,7 +211,7 @@ class LookOut:
                         logging.error(
                             "could not fetch data: {}".format(jsondata["data"])
                         )
-                        return []
+                    return []
                 elif response.status_code == 400:
                     logging.error(
                         "The requested report cannot be generated for this account because"
@@ -215,6 +226,12 @@ class LookOut:
                         )
                     )
                     return []
+                elif response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", 10))
+                    logging.info(
+                        f"Rate limit exceeded. Waiting {retry_after} seconds before retrying..."
+                    )
+                    time.sleep(retry_after)
                 else:
                     logging.error(
                         "Something wrong. Error code: {}, {}".format(
